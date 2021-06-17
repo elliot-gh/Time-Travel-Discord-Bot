@@ -1,0 +1,25 @@
+{
+  "name": "Time-Travel-Discord-Bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhipeeDip/Time-Travel-Discord-Bot.git"
+  },
+  "author": "Elliot Yoon",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/WhipeeDip/Time-Travel-Discord-Bot/issues"
+  },
+  "homepage": "https://github.com/WhipeeDip/Time-Travel-Discord-Bot#readme",
+  "dependencies": {
+    "axios": "^0.21.1",
+    "discord.js": "^12.5.3",
+    "dotenv": "^10.0.0",
+    "linkifyjs": "^3.0.0-beta.3"
+  }
+}
