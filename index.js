@@ -4,8 +4,13 @@
  */
 
 require('dotenv').config();
-const Discord = require('discord.js');
-const client = new Discord.Client();
+const { Client, Intents } = require('discord.js');
+const client = new Client({
+  intents: [
+    Intents.FLAGS.GUILDS |
+    Intents.FLAGS.GUILD_MESSAGES
+  ]
+});
 const util = require('util');
 
 // console strings
@@ -17,6 +22,13 @@ const CON_LOGGED_IN = '\n----------\n' +
 
 // error strings
 const ERR_DISCORD_TOKEN_NOT_SET = 'DISCORD_TOKEN was not set!';
+
+const errorHandler = (err) => {
+  console.error(`Uncaught exception or promise: ${err}`);
+};
+
+process.on('uncaughtException', errorHandler);
+process.on('unhandledRejection', errorHandler);
 
 // login with token from .env
 if(process.env.DISCORD_TOKEN === undefined || process.env.DISCORD_TOKEN === '') {

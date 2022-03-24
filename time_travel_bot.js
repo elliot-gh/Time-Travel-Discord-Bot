@@ -117,7 +117,7 @@ module.exports = function(discordClient) {
             .addFields(
                 { name: 'Reason', value: 'Invalid URL' }
             );
-            channel.send(failEmbed);
+            channel.send({ embeds: [failEmbed] });
             return;
         }
 
@@ -128,7 +128,7 @@ module.exports = function(discordClient) {
                 { name: 'Original URL', value: url }
             );
 
-        const msg = await channel.send(holdEmbed);
+        const msg = await channel.send({ embeds: [holdEmbed] });
 
         let result = await callMementoApi(getFormattedTime(), url);
         if (result.error === null) {
@@ -140,16 +140,16 @@ module.exports = function(discordClient) {
                     { name: 'Original URL', value: url }
                 )
                 .setFooter(`Timestamp of Memento: ${result.datetime}`);
-            msg.edit(successEmbed);
+            msg.edit({ embeds: [successEmbed] });
         } else {
             const failEmbed = new Discord.MessageEmbed()
                 .setColor(COLOR_ERR)
                 .setTitle('Error while time traveling')
                 .addFields(
-                    { name: 'Reason', value: result.error },
+                    { name: 'Reason', value: result.error.toString() },
                     { name: 'Original URL', value: url }
                 );
-            msg.edit(failEmbed);
+            msg.edit({ embeds: [failEmbed] });
         }
     };
 
@@ -196,7 +196,7 @@ module.exports = function(discordClient) {
         console.log('handleAuto() finished');
     };
 
-    discordClient.on('message', async (msg) => {
+    discordClient.on('messageCreate', async (msg) => {
         let msgContent = msg.content;
         let channel = msg.channel;
 
