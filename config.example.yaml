@@ -1,0 +1,18 @@
+# Copy this file as "config.yaml", and fill in the values as appropriate.
+# ------------------------------------------------------------------------------
+
+# Whether to auto time travel URLs sent in messages
+# NOTE: This needs the allowlist defined!
+autoTimeTravel: true
+
+# Domains to auto travel
+# Domain only per line, with true
+allowlist:
+  example.com: true
+  example.org: true
+
+# Priority archivers
+# Domain only per line
+priority:
+  - archive.today
+  - archive.org
