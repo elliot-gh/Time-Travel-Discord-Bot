@@ -1,7 +1,6 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { SlashCommandBuilder } from "@discordjs/builders";
-import { CommandInteraction, Client, Intents, TextChannel, MessageEmbed, Message } from "discord.js";
+import { CommandInteraction, Client, Message, GatewayIntentBits, ChatInputCommandInteraction, EmbedBuilder,
+    ContextMenuCommandBuilder, ApplicationCommandType, MessageContextMenuCommandInteraction } from "discord.js";
 import axios from "axios";
 import { find } from "linkifyjs";
 import { BotInterface } from "../../BotInterface";
@@ -9,15 +8,16 @@ import { readYamlConfig } from "../../ConfigUtils";
 import { TimeTravelConfig } from "./TimeTravelConfig";
 
 export class TimeTravelBot implements BotInterface {
-    intents: number[];
-    slashCommands: [SlashCommandBuilder];
+    intents: GatewayIntentBits[];
+    commands: (SlashCommandBuilder | ContextMenuCommandBuilder)[];
 
     private static readonly OPT_URL = "url";
     private slashTimeTravel!: SlashCommandBuilder;
+    private contextTimeTravel!: ContextMenuCommandBuilder;
     private config!: TimeTravelConfig;
 
     constructor() {
-        this.intents = [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES];
+        this.intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages];
         this.slashTimeTravel = new SlashCommandBuilder()
             .setName("timetravel")
             .setDescription("Tries to find an archived version of a URL.")
@@ -27,14 +27,23 @@ export class TimeTravelBot implements BotInterface {
                     .setDescription("The URL.")
                     .setRequired(true)
             ) as SlashCommandBuilder;
-        this.slashCommands = [this.slashTimeTravel];
+        this.contextTimeTravel = new ContextMenuCommandBuilder()
+            .setName("Time Travel URLs")
+            .setType(ApplicationCommandType.Message) as ContextMenuCommandBuilder;
+        this.commands = [this.slashTimeTravel, this.contextTimeTravel];
     }
 
-    async processSlashCommand(interaction: CommandInteraction): Promise<void> {
+    async processCommand(interaction: CommandInteraction): Promise<void> {
+        if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) {
+            return;
+        }
+
         console.log(`[TimeTravelBot] got interaction: ${interaction}`);
         try {
-            if (interaction.commandName === this.slashTimeTravel.name) {
+            if (interaction.isChatInputCommand() && interaction.commandName === this.slashTimeTravel.name) {
                 await this.handleSlashCommand(interaction);
+            } else if (interaction.isMessageContextMenuCommand() && interaction.commandName === this.contextTimeTravel.name) {
+                await this.handleContextCommand(interaction);
             }
         } catch (error) {
             console.error(`[TimeTravelBot] Uncaught exception in processSlashCommand(): ${error}`);
@@ -44,16 +53,16 @@ export class TimeTravelBot implements BotInterface {
     async useClient(client: Client): Promise<void> {
         if (this.config.autoTimeTravel) {
             client.on("messageCreate", async (message) => {
-                if (message.author.id === client.user!.id) {
+                if (message.author.id === client.user?.id) {
                     return;
                 }
 
-                await this.handleAuto(message);
+                await this.handleAuto(message, false);
             });
         }
     }
 
-    async handleSlashCommand(interaction: CommandInteraction): Promise<void> {
+    async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
         const url = interaction.options.getString(TimeTravelBot.OPT_URL, true);
         try {
             await interaction.deferReply();
@@ -82,7 +91,7 @@ export class TimeTravelBot implements BotInterface {
         }
     }
 
-    async timeTravel(originalUrl: string): Promise<MessageEmbed> {
+    async timeTravel(originalUrl: string): Promise<EmbedBuilder> {
         console.log(`[TimeTravelBot] Attempting to time travel ${originalUrl}`);
 
         const fullUrl = `https://timetravel.mementoweb.org/api/json/${TimeTravelBot.getCurrentTime()}/${originalUrl}`;
@@ -126,13 +135,30 @@ export class TimeTravelBot implements BotInterface {
         }
     }
 
-    async handleAuto(message: Message): Promise<void> {
+    async handleContextCommand(interaction: MessageContextMenuCommandInteraction): Promise<void> {
+        const content = interaction.targetMessage.content;
+        console.log(`[TimeTravelBot] Got handleContextCommand() for message: ${content}`);
+        const embed = new EmbedBuilder()
+            .setTitle("Processing time travel for the URLs of the target message")
+            .addFields({ name: "Target Message:", value: interaction.targetMessage.url })
+            .setColor(0xFFFFFF);
+        const reply = await interaction.reply({ embeds: [embed] });
+        const urlCount = await this.handleAuto(interaction.targetMessage, true);
+        if (urlCount === 0) {
+            embed
+                .setDescription("No valid URLs found.")
+                .setColor(0xFF0000);
+            await interaction.editReply({ embeds: [embed] });
+        }
+    }
+
+    async handleAuto(message: Message, contextMenu: boolean): Promise<number> {
         try {
             const content = message.content;
 
             const linkifyResults = find(content, "url");
             if (linkifyResults.length === 0) {
-                return;
+                return 0;
             }
 
             const urls = new Set<string>();
@@ -148,7 +174,7 @@ export class TimeTravelBot implements BotInterface {
                         hostname = hostname.substring(4);
                     }
 
-                    if (this.config.allowlist[hostname]) {
+                    if (contextMenu || this.config.allowlist[hostname]) {
                         urls.add(result.href);
                     }
                 } catch (error) {
@@ -158,7 +184,7 @@ export class TimeTravelBot implements BotInterface {
             }
 
             if (urls.size === 0) {
-                return;
+                return 0;
             }
 
             console.log(`[TimeTravelBot] handleAuto() May have found URLs: ${JSON.stringify(Array.from(urls))}`);
@@ -190,15 +216,16 @@ export class TimeTravelBot implements BotInterface {
             }
 
             console.log("[TimeTravelBot] handleAuto() finished");
+            return urls.size;
         } catch (error) {
             console.error(`[TimeTravelBot] Ran into error in handleAuto(), ignoring: ${error}`);
+            return 0;
         }
     }
 
     async init(): Promise<string | null> {
-        const configPath = join(dirname(fileURLToPath(import.meta.url)), "config.yaml");
         try {
-            this.config = await readYamlConfig<TimeTravelConfig>(configPath);
+            this.config = await readYamlConfig<TimeTravelConfig>(import.meta, "config.yaml");
         } catch (error) {
             const errMsg = `[TimeTravelBot] Unable to read config: ${error}`;
             console.error(errMsg);
@@ -216,15 +243,15 @@ export class TimeTravelBot implements BotInterface {
             .replace(/:/g, "");
     }
 
-    static createHoldEmbed(url: string): MessageEmbed {
-        return new MessageEmbed()
+    static createHoldEmbed(url: string): EmbedBuilder {
+        return new EmbedBuilder()
             .setTitle("Time traveling, please hold...")
             .setColor(0x8C8F91)
-            .addField("Original URL", url);
+            .addFields({ name: "Original URL", value: url });
     }
 
-    static createSuccessEmbed(originalUrl: string, mementoUrl: string, datetime: string): MessageEmbed {
-        return new MessageEmbed()
+    static createSuccessEmbed(originalUrl: string, mementoUrl: string, datetime: string): EmbedBuilder {
+        return new EmbedBuilder()
             .setTitle("Time travel successful")
             .setColor(0x00FF00)
             .addFields(
@@ -234,7 +261,7 @@ export class TimeTravelBot implements BotInterface {
             .setFooter({ text: `Timestamp of Memento: ${datetime}` });
     }
 
-    static createFailedEmbed(url: string, error: unknown = null): MessageEmbed {
+    static createFailedEmbed(url: string, error: unknown = null): EmbedBuilder {
         let reason = "Unknown error. Bot owner should check logs.";
         if (error instanceof Error) {
             reason = error.message;
@@ -244,7 +271,7 @@ export class TimeTravelBot implements BotInterface {
             reason = error.toString();
         }
 
-        return new MessageEmbed()
+        return new EmbedBuilder()
             .setTitle("Error while time traveling")
             .setColor(0xFF0000)
             .addFields(
