@@ -1,17 +1,17 @@
 {
   "name": "time-travel-discord-bot",
-  "version": "3.0.1",
+  "version": "4.0.0",
   "repository": "git@github.com:elliot-gh/Time-Travel-Discord-Bot.git",
   "author": "Elliot",
   "license": "GPL-3.0",
   "private": true,
   "type": "module",
-  "packageManager": "yarn@3.2.1",
+  "packageManager": "yarn@3.3.0",
   "engines": {
-    "node": ">=16.15.0"
+    "node": ">=18.12.0"
   },
   "dependencies": {
-    "axios": "^0.27.2",
-    "linkifyjs": "^3.0.5"
+    "axios": "^1.2.0",
+    "linkifyjs": "^4.0.2"
   }
 }

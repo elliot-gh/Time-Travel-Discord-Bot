@@ -4,7 +4,7 @@ import { CommandInteraction, Client, Message, GatewayIntentBits, ChatInputComman
 import axios from "axios";
 import { find } from "linkifyjs";
 import { BotInterface } from "../../BotInterface";
-import { readYamlConfig } from "../../ConfigUtils";
+import { readYamlConfig } from "../../utils/ConfigUtils";
 import { TimeTravelConfig } from "./TimeTravelConfig";
 
 export class TimeTravelBot implements BotInterface {
