@@ -11,8 +11,13 @@ allowlist:
   example.com: true
   example.org: true
 
-# Priority archivers
-# Domain only per line
-priority:
-  - archive.today
-  - archive.org
+# Memento API compatible services
+# See: http://mementoweb.org/depot/, include trailing slash
+# fallback is a url that will show a user in their browser the latest available
+mementoDepots:
+  archive.today:
+    timeGate: https://archive.today/timegate/
+    fallback: https://archive.today/newest/
+  Internet Archive:
+    timeGate: https://web.archive.org/web/
+    fallback: https://web.archive.org/web/*/
