@@ -1,5 +1,6 @@
 export type TimeTravelConfig = {
     autoTimeTravel: boolean,
+    axiosUserAgent: string | null,
     allowlist: {
         [domain: string]: boolean
     },

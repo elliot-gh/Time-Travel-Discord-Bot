@@ -1,106 +1,86 @@
 import { ArchiveSubmissionResult, IArchiveSubmission } from "./IArchiveSubmission";
-import axios from "axios";
+import axios, { AxiosRequestConfig } from "axios";
+import { MementoDepot } from "./MementoDepot";
 
 export class InternetArchiveSubmission implements IArchiveSubmission {
-    private static readonly JOB_REGEX = new RegExp(String.raw`Job\("([^ ",\\/:]+)",`, "i");
-
     readonly name: string;
     readonly originalUrl: string;
+    readonly userAgent: string | null;
+    readonly waitBetweenStatus = null;
     private jobId: string | null;
-    private timestamp: string | null;
+    private datetime: Date | null = null;
     private statusCode: number | null;
+    private isDone = false;
+    private finalUrl: string | null = null;
 
-    constructor(url: string) {
+    constructor(url: string, userAgent: string | null) {
         console.log(`[InternetArchiveSubmission] constructor for url ${url}`);
         this.name = "Internet Archive";
         this.originalUrl = url;
         this.jobId = null;
-        this.timestamp = null;
         this.statusCode = null;
+        this.userAgent = userAgent;
     }
 
     async submit(): Promise<ArchiveSubmissionResult> {
         const fullUrl = `https://web.archive.org/save/${this.originalUrl}`;
-        const formData = new FormData();
-        formData.append("url", this.originalUrl);
-        formData.append("capture_all", "on");
 
         console.log(`[InternetArchiveSubmission] Calling submit() using url ${fullUrl}`);
-        const response = await axios.post(fullUrl, { validateStatus: () => true });
-        this.statusCode = response.status;
-        if (this.statusCode !== 200) {
-            return {
-                originalUrl: this.originalUrl,
-                statusCode: this.statusCode,
-                isDone: false,
-                finalUrl: null
+        const axiosConfig: AxiosRequestConfig = {
+            validateStatus: () => true
+        };
+
+        if (this.userAgent !== null) {
+            axiosConfig.headers = {
+                "User-Agent": this.userAgent
             };
         }
 
-        const responseStr = response.data as string;
-        const regexMatches = responseStr.match(InternetArchiveSubmission.JOB_REGEX);
-        if (regexMatches === null || regexMatches.length === 0) {
-            const errStr = `[InternetArchiveSubmission] Unable to find job ID in response: ${responseStr}`;
-            console.error(errStr);
-            throw new Error(errStr);
+        const response = await axios.get(fullUrl, axiosConfig);
+        this.isDone = true;
+        this.statusCode = response.status;
+        if (this.statusCode >= 400) {
+            this.isDone = true;
+            return {
+                originalUrl: this.originalUrl,
+                statusCode: this.statusCode,
+                isDone: this.isDone,
+                finalUrl: null,
+                datetime: null
+            };
         }
 
-        this.jobId = regexMatches[1];
+        const mementoUrl: string | null = MementoDepot.parseResponseHeaders(response.headers);
+        if (mementoUrl === null) {
+            console.error(`[InternetArchiveSubmission] Could not find URL in response headers:\n${JSON.stringify(response.headers, null, 2)}`);
+            this.isDone = true;
+            return {
+                originalUrl: this.originalUrl,
+                statusCode: this.statusCode,
+                isDone: this.isDone,
+                finalUrl: null,
+                datetime: null
+            };
+        }
+
+        this.finalUrl = mementoUrl;
+        this.datetime = MementoDepot.getDateFromMementoUrl(mementoUrl);
         return {
             originalUrl: this.originalUrl,
             statusCode: this.statusCode,
-            isDone: false,
-            finalUrl: null
+            isDone: this.isDone,
+            finalUrl: this.finalUrl,
+            datetime: this.datetime
         };
     }
 
     async checkStatus(): Promise<ArchiveSubmissionResult> {
-        if (this.timestamp !== null) {
-            const mementoUrl = this.timestampToMementoUrl();
-            return {
-                originalUrl: this.originalUrl,
-                statusCode: this.statusCode,
-                isDone: true,
-                finalUrl: mementoUrl
-            };
-        }
-
-        const fullUrl = `https://web.archive.org/save/status/${this.jobId}`;
-        console.log(`[InternetArchiveSubmission] Calling checkStatus() using url ${fullUrl}`);
-        const response = await axios.get(fullUrl, { validateStatus: () => true });
-        this.statusCode = response.status;
-        if (this.statusCode !== 200) {
-            return {
-                originalUrl: this.originalUrl,
-                statusCode: this.statusCode,
-                isDone: false,
-                finalUrl: null
-            };
-        }
-
-        const responseObj = JSON.parse(response.data as string);
-        const status = responseObj.status as string;
-        if (status !== "success") {
-            return {
-                originalUrl: this.originalUrl,
-                statusCode: this.statusCode,
-                isDone: false,
-                finalUrl: null
-            };
-        }
-
-        const timestamp = responseObj.timestamp as string;
-        this.timestamp = timestamp;
-        const mementoUrl = this.timestampToMementoUrl();
         return {
             originalUrl: this.originalUrl,
             statusCode: this.statusCode,
-            isDone: true,
-            finalUrl: mementoUrl
+            isDone: this.isDone,
+            finalUrl: this.finalUrl,
+            datetime: this.datetime
         };
-    }
-
-    timestampToMementoUrl(): string {
-        return `https://web.archive.org/web/${this.timestamp}/${this.originalUrl}`;
     }
 }
