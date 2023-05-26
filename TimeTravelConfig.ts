@@ -1,7 +1,13 @@
 export type TimeTravelConfig = {
     autoTimeTravel: boolean,
+    axiosUserAgent: string | null,
     allowlist: {
         [domain: string]: boolean
     },
-    priority: string[]
+    mementoDepots: {
+        [depotName: string]: {
+            timeGate: string,
+            fallback: string | null
+        }
+    }
 }

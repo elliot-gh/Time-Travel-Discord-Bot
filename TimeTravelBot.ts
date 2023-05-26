@@ -1,17 +1,42 @@
+import { EventEmitter } from "node:events";
 import { SlashCommandBuilder } from "@discordjs/builders";
 import { CommandInteraction, Client, Message, GatewayIntentBits, ChatInputCommandInteraction, EmbedBuilder,
-    ContextMenuCommandBuilder, ApplicationCommandType, MessageContextMenuCommandInteraction } from "discord.js";
-import axios from "axios";
+    ContextMenuCommandBuilder, ApplicationCommandType, MessageContextMenuCommandInteraction, ButtonBuilder,
+    ActionRowBuilder, ButtonStyle, User, italic, BaseMessageOptions, ButtonInteraction, TextInputBuilder, ModalSubmitInteraction, ModalBuilder } from "discord.js";
+import { APIEmbedField, TextInputStyle } from "discord-api-types/v10";
 import { find } from "linkifyjs";
 import { BotInterface } from "../../BotInterface";
 import { readYamlConfig } from "../../utils/ConfigUtils";
 import { TimeTravelConfig } from "./TimeTravelConfig";
+import { TimeTravelProcessorResult, TimeTravelProcessor, TimeTravelProcessorSubmissionEvent } from "./TimeTravelProcessor";
+
+type MementoEmbedDetails = {
+    originalUrl: string,
+    mementoDepotName: string,
+    mementoUrl: string,
+    mementoReason: string | null,
+    wasSubmitted: boolean,
+    userUrl: string | null,
+    user: User | null,
+    datetime: Date | string | null
+}
 
 export class TimeTravelBot implements BotInterface {
     intents: GatewayIntentBits[];
     commands: (SlashCommandBuilder | ContextMenuCommandBuilder)[];
 
     private static readonly OPT_URL = "url";
+    private static readonly BTN_USER_URL_MODAL = "timeTravel_btnUserUrlModal";
+    private static readonly BTN_USER_URL_DELETE = "timeTravel_btnUserUrlDelete";
+    private static readonly MODAL_ID_USER_URL = "timeTravel_modalUrlId";
+    private static readonly MODAL_INPUT_URL = "timeTravel_modalInputUrl";
+    private static readonly COLOR_SUCCESS = 0x00FF00;
+    private static readonly COLOR_FALLBACK = 0xFFCC00;
+    private static readonly COLOR_USER_ONLY = 0X40A6CE;
+    private static readonly AUTO_TIMEOUT = 500;
+    private static readonly FALLBACK_REASON = "Ran into an error while time traveling. The above URL should still let you get the latest snapshot.";
+    private static readonly SUBMISSION_REASON = "Did not find an existing Memento, so created a new submission.";
+
     private slashTimeTravel!: SlashCommandBuilder;
     private contextTimeTravel!: ContextMenuCommandBuilder;
     private config!: TimeTravelConfig;
@@ -59,173 +84,337 @@ export class TimeTravelBot implements BotInterface {
 
                 await this.handleAuto(message, false);
             });
+
+            client.on("interactionCreate", async (interaction) => {
+                if (interaction.user.id === client.user?.id) {
+                    return;
+                }
+
+                if (interaction.isButton()) {
+                    await this.handleButtonClick(interaction);
+                } else if (interaction.isModalSubmit()) {
+                    await this.handleModalSubmit(interaction);
+                }
+            });
         }
+    }
+
+    async handleButtonClick(interaction: ButtonInteraction): Promise<void> {
+        if (interaction.customId === TimeTravelBot.BTN_USER_URL_MODAL) {
+            console.log(`[TimeTravelBot] Got button click: ${interaction.customId}`);
+            await this.handleUserUrlModalClick(interaction);
+        } else if (interaction.customId === TimeTravelBot.BTN_USER_URL_DELETE) {
+            console.log(`[TimeTravelBot] Got button click: ${interaction.customId}`);
+            await this.handleUserDeleteClick(interaction);
+        }
+    }
+
+    async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+        if (interaction.customId === TimeTravelBot.MODAL_ID_USER_URL) {
+            console.log(`[TimeTravelBot] Got modal submit: ${interaction.customId}`);
+            await this.handleUserUrlModalSubmit(interaction);
+        }
+    }
+
+    async handleUserUrlModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+        const userUrl = interaction.fields.getTextInputValue(TimeTravelBot.MODAL_INPUT_URL);
+        console.log(`[TimeTravelBot] Got user URL: ${userUrl} from user: ${interaction.user}}`);
+        const validUrl = TimeTravelBot.getValidUrl(userUrl, false);
+        if (validUrl === null) {
+            console.log(`[TimeTravelBot] Invalid URL: ${userUrl} from user: ${interaction.user}}`);
+            await interaction.reply({
+                embeds: [TimeTravelBot.createErrorEmbed("Invalid URL", userUrl)],
+                ephemeral: true
+            });
+            return;
+        }
+
+        await interaction.deferReply({
+            ephemeral: true
+        });
+
+        if (interaction.message === null) {
+            console.error(`[TimeTravelBot] Could not get message from interaction: ${interaction}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
+            });
+            return;
+        }
+
+        const details = TimeTravelBot.extractDetailsFromMessage(interaction.message);
+        if (details === null)  {
+            console.error(`[TimeTravelBot] Could not extract details from message: ${interaction.message}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
+            });
+            return;
+        }
+        details.user = interaction.user;
+        details.userUrl = validUrl;
+
+        const newMsg = TimeTravelBot.createMementoEmbed(details);
+        try {
+            await interaction.message.edit(newMsg);
+        } catch (error) {
+            console.error(`[TimeTravelBot] Could not edit message: ${error}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
+            });
+            return;
+        }
+
+        await interaction.editReply({
+            embeds: [TimeTravelBot.createReferencedMessageSuccessEmbed(interaction.message, "Time travel message updated", "Your URL", validUrl)]
+        });
+    }
+
+    async handleUserUrlModalClick(interaction: ButtonInteraction): Promise<void> {
+        const urlInput = new TextInputBuilder()
+            .setCustomId(TimeTravelBot.MODAL_INPUT_URL)
+            .setLabel("URL to Share")
+            .setStyle(TextInputStyle.Paragraph)
+            .setMinLength(8)
+            .setRequired(true);
+        const row = new ActionRowBuilder().addComponents(urlInput) as ActionRowBuilder<TextInputBuilder>;
+
+        const modal = new ModalBuilder()
+            .setCustomId(TimeTravelBot.MODAL_ID_USER_URL)
+            .setTitle("Providing your own URL")
+            .addComponents(row);
+
+        await interaction.showModal(modal);
+    }
+
+    async handleUserDeleteClick(interaction: ButtonInteraction): Promise<void> {
+        const message = interaction.message;
+
+        await interaction.deferReply({
+            ephemeral: true
+        });
+
+        const details = TimeTravelBot.extractDetailsFromMessage(message);
+        if (details === null)  {
+            console.error(`[TimeTravelBot] Could not extract details from message: ${message}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
+            });
+            return;
+        }
+        const oldUrl = details.userUrl;
+        details.user = null;
+        details.userUrl = null;
+
+        const newMsg = TimeTravelBot.createMementoEmbed(details);
+        try {
+            await message.edit(newMsg);
+        } catch (error) {
+            console.error(`[TimeTravelBot] Could not edit message in handleUserDeleteClick(): ${error}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
+            });
+            return;
+        }
+
+        await interaction.editReply({
+            embeds: [TimeTravelBot.createReferencedMessageSuccessEmbed(interaction.message, "Deleted user provided URL", "Old URL", oldUrl)]
+        });
     }
 
     async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
         const url = interaction.options.getString(TimeTravelBot.OPT_URL, true);
         try {
-            await interaction.deferReply();
-            console.log(`[TimeTravelBot] got URL: ${url}`);
+            console.log(`[TimeTravelBot] handleSlashCommand() got URL: ${url}`);
 
-            if (!TimeTravelBot.isValidUrl(url)) {
-                await interaction.editReply({
-                    embeds: [TimeTravelBot.createFailedEmbed(url, "Invalid URL.")]
+            const validUrl = TimeTravelBot.getValidUrl(url, true);
+            if (validUrl === null) {
+                await interaction.reply({
+                    embeds: [TimeTravelBot.createErrorEmbed("Invalid URL", url)],
+                    ephemeral: true
                 });
                 return;
             }
 
-            await interaction.editReply({
-                embeds: [TimeTravelBot.createHoldEmbed(url)]
-            });
+            await interaction.deferReply();
+            await interaction.editReply(TimeTravelBot.createHoldEmbed(url));
 
-            const resultEmbed = await this.timeTravel(url);
-            await interaction.editReply({
-                embeds: [resultEmbed]
+            const eventEmitter = new EventEmitter();
+            const emitterPromises: Promise<any>[] = [];
+            const emitterId = `${interaction.id}__${Date.now()}`;
+            eventEmitter.on(emitterId, (eventObj: TimeTravelProcessorSubmissionEvent) => {
+                emitterPromises.push(interaction.editReply(TimeTravelBot.createHoldSaveEmbed(eventObj)));
             });
+            const timeTravelPromise = this.timeTravel(url, eventEmitter, emitterId);
+
+            try {
+                await Promise.all(emitterPromises);
+            } catch {
+                // nothing
+            }
+
+            const result = await timeTravelPromise;
+            eventEmitter.removeAllListeners(emitterId);
+            await interaction.editReply(result);
         } catch (error) {
             console.error(`[TimeTravelBot] Got error handling slash command: ${error}`);
-            await interaction.editReply({
-                embeds: [TimeTravelBot.createFailedEmbed(url, error)]
-            });
-        }
-    }
-
-    async timeTravel(originalUrl: string): Promise<EmbedBuilder> {
-        console.log(`[TimeTravelBot] Attempting to time travel ${originalUrl}`);
-
-        const fullUrl = `https://timetravel.mementoweb.org/api/json/${TimeTravelBot.getCurrentTime()}/${originalUrl}`;
-        console.log(`[TimeTravelBot] Calling GET ${fullUrl}`);
-
-        try {
-            const response = await axios.get(fullUrl);
-            const status = response.status;
-            if (status === 200) {
-                const closest = response.data.mementos.closest;
-                console.log(`[TimeTravelBot] Success on GET ${fullUrl}:\n${JSON.stringify(closest)}`);
-
-                let found = null;
-                for (const priorityHost of this.config.priority) {
-                    for (const archiveStr of closest.uri) {
-                        const archiveUrl = new URL(archiveStr);
-                        if (archiveUrl.hostname === priorityHost.trim()) {
-                            found = archiveStr;
-                            break;
-                        }
-                    }
-                }
-
-                if (found === null) {
-                    found = closest.uri[0];
-                }
-
-                return TimeTravelBot.createSuccessEmbed(originalUrl, found, closest.datetime);
-            } else {
-                console.log(`[TimeTravelBot] Nothing found on GET ${fullUrl}`);
-                return TimeTravelBot.createFailedEmbed(originalUrl, "No Mementos found.");
-            }
-        } catch (error) {
-            if (axios.isAxiosError(error) && error.response !== undefined) {
-                console.error(`[TimeTravelBot] Axios error while calling GET ${fullUrl}:\n${error.response.status} ${error.response.data}`);
-                return TimeTravelBot.createFailedEmbed(originalUrl, error.response.status);
-            } else {
-                console.error(`[TimeTravelBot] Non-Axios error while calling GET ${fullUrl}:\n${error}`);
-                return TimeTravelBot.createFailedEmbed(originalUrl, error);
-            }
+            await interaction.editReply(TimeTravelBot.createFallbackEmbed(url, null));
         }
     }
 
     async handleContextCommand(interaction: MessageContextMenuCommandInteraction): Promise<void> {
         const content = interaction.targetMessage.content;
         console.log(`[TimeTravelBot] Got handleContextCommand() for message: ${content}`);
+        const linkifyResults = find(content, "url");
+        if (linkifyResults.length === 0) {
+            await interaction.reply({
+                embeds: [TimeTravelBot.createErrorEmbed("No URLs Found", null)],
+                ephemeral: true
+            });
+            return;
+        }
+
         const embed = new EmbedBuilder()
             .setTitle("Processing time travel for the URLs of the target message")
-            .addFields({ name: "Target Message:", value: interaction.targetMessage.url })
+            .addFields(
+                { name: "Target Message", value: interaction.targetMessage.url },
+                { name: "URL Count", value: linkifyResults.length.toString() }
+            )
             .setColor(0xFFFFFF);
-        const reply = await interaction.reply({ embeds: [embed] });
-        const urlCount = await this.handleAuto(interaction.targetMessage, true);
-        if (urlCount === 0) {
-            embed
-                .setDescription("No valid URLs found.")
-                .setColor(0xFF0000);
-            await interaction.editReply({ embeds: [embed] });
+        await interaction.reply({ embeds: [embed] });
+        try {
+            await this.handleAuto(interaction.targetMessage, true);
+        } catch (error) {
+            console.error(`[TimeTravelBot] Got error handling context command:\n${error}`);
+            await interaction.editReply({
+                embeds: [TimeTravelBot.createErrorEmbed("Unable to complete context menu command", null)]
+            });
         }
     }
 
-    async handleAuto(message: Message, contextMenu: boolean): Promise<number> {
+    async handleAuto(message: Message, contextMenu: boolean): Promise<void> {
         try {
             const content = message.content;
 
             const linkifyResults = find(content, "url");
             if (linkifyResults.length === 0) {
-                return 0;
+                return;
             }
 
-            const urls = new Set<string>();
+            const urls: string[] = [];
             for (const result of linkifyResults) {
                 try {
                     const url = new URL(result.href);
-                    if (url.pathname === "/") {
-                        continue;
-                    }
-
                     let hostname = url.hostname;
                     if (hostname.startsWith("www.")) {
                         hostname = hostname.substring(4);
                     }
 
-                    if (contextMenu || this.config.allowlist[hostname]) {
-                        urls.add(result.href);
+                    if (contextMenu) {
+                        urls.push(result.href);
+                        continue;
                     }
+
+                    if (!this.config.allowlist[hostname] || url.pathname === "/") {
+                        continue;
+                    }
+
+                    urls.push(result.href);
                 } catch (error) {
-                    console.error(`[TimeTravelBot] Ignoring error: ${error}`);
+                    console.error(`[TimeTravelBot] Ignoring error for URL ${result.href}:\n${error}`);
                     continue;
                 }
             }
 
-            if (urls.size === 0) {
-                return 0;
+            if (urls.length === 0) {
+                return;
             }
 
             console.log(`[TimeTravelBot] handleAuto() May have found URLs: ${JSON.stringify(Array.from(urls))}`);
-
+            const emitterPrefix = `${message.id}__${Date.now()}__`;
             for (const url of urls) {
-                const holdEmbed = await TimeTravelBot.createHoldEmbed(url);
-                const replyMsg = await message.reply({
-                    embeds: [holdEmbed],
-                    allowedMentions: {
-                        repliedUser: false
-                    }
+                const replyMsg = await message.reply(TimeTravelBot.createHoldEmbed(url));
+
+                const eventEmitter = new EventEmitter();
+                const emitterPromises: Promise<any>[] = [];
+                const emitterId = `${emitterPrefix}${replyMsg.id}`;
+                eventEmitter.on(emitterId, (eventObj: TimeTravelProcessorSubmissionEvent) => {
+                    emitterPromises.push(replyMsg.edit(TimeTravelBot.createHoldSaveEmbed(eventObj)));
                 });
+                const timeTravelPromise = this.timeTravel(url, eventEmitter, emitterId);
 
                 try {
-                    const replyEmbed = await this.timeTravel(url);
-                    await replyMsg.edit({
-                        embeds: [replyEmbed],
-                        allowedMentions: {
-                            repliedUser: false
-                        }
-                    });
-                } catch (error) {
-                    console.error(`[TimeTravelBot] Error in auto while calling timeTravel(): ${error}`);
-                    await replyMsg.edit({
-                        embeds: [TimeTravelBot.createFailedEmbed(url, error)]
-                    });
+                    await Promise.all(emitterPromises);
+                } catch {
+                    // nothing
                 }
-                await new Promise(resolve => setTimeout(resolve, 2000)); // rate limit if we move too fast
+
+                try {
+                    const result = await timeTravelPromise;
+                    await replyMsg.edit(result);
+                } catch (error) {
+                    console.error(`[TimeTravelBot] Error in auto while calling timeTravel() for url ${url}:\n${error}`);
+                    await replyMsg.edit(TimeTravelBot.createFallbackEmbed(url, null));
+                }
+
+                eventEmitter.removeAllListeners(emitterId);
+                await new Promise(resolve => setTimeout(resolve, TimeTravelBot.AUTO_TIMEOUT));
             }
 
             console.log("[TimeTravelBot] handleAuto() finished");
-            return urls.size;
         } catch (error) {
             console.error(`[TimeTravelBot] Ran into error in handleAuto(), ignoring: ${error}`);
-            return 0;
         }
+    }
+
+    async timeTravel(originalUrl: string, eventEmitter: EventEmitter, emitterId: string): Promise<BaseMessageOptions> {
+        console.log(`[TimeTravelBot] Attempting to time travel ${originalUrl}`);
+        const processor = new TimeTravelProcessor(originalUrl);
+
+        let result: TimeTravelProcessorResult | null = null;
+        try {
+            result = await processor.process(eventEmitter, emitterId);
+        } catch (error) {
+            console.error(`[TimeTravelBot] Error in timeTravel():\n${error}`);
+            result = null;
+        }
+
+        if (result === null) {
+            console.error(`[TimeTravelBot] Got null result for ${originalUrl}`);
+            return TimeTravelBot.createFallbackEmbed(originalUrl, processor.getFallbackUrl());
+        }
+
+        console.log(`[TimeTravelBot] timeTravel() processor for ${originalUrl} returned result:\n${JSON.stringify(result, null, 2)}`);
+        if (result.foundUrl !== null && result.depotUsedName !== null) {
+            return TimeTravelBot.createMementoEmbed({
+                originalUrl: originalUrl,
+                mementoUrl: result.foundUrl,
+                mementoDepotName: result.depotUsedName,
+                mementoReason: null,
+                wasSubmitted: false,
+                userUrl: null,
+                user: null,
+                datetime: result.datetime,
+            });
+        } else if (result.submittedUrl !== null && result.submittedName !== null) {
+            return TimeTravelBot.createMementoEmbed({
+                originalUrl: originalUrl,
+                mementoUrl: result.submittedUrl,
+                mementoDepotName: result.submittedName,
+                mementoReason: TimeTravelBot.SUBMISSION_REASON,
+                wasSubmitted: true,
+                userUrl: null,
+                user: null,
+                datetime: result.datetime,
+            });
+        }
+
+        console.error(`[TimeTravelBot] timeTravel() processor for ${originalUrl} returned malformed result:\n${JSON.stringify(result, null, 2)}`);
+        return TimeTravelBot.createFallbackEmbed(originalUrl, processor.getFallbackUrl());
     }
 
     async init(): Promise<string | null> {
         try {
             this.config = await readYamlConfig<TimeTravelConfig>(import.meta, "config.yaml");
+            TimeTravelProcessor.init(this.config);
         } catch (error) {
             const errMsg = `[TimeTravelBot] Unable to read config: ${error}`;
             console.error(errMsg);
@@ -235,57 +424,219 @@ export class TimeTravelBot implements BotInterface {
         return null;
     }
 
-    static getCurrentTime(): string {
-        const isoStr = new Date().toISOString(); // 2011-10-05T14:48:00.000Z
-        return isoStr.split(".")[0]
-            .replace(/-/g, "")
-            .replace(/T/g, "")
-            .replace(/:/g, "");
+    static extractDetailsFromMessage(message: Message): MementoEmbedDetails | null {
+        const referencedEmbeds = message.embeds;
+        if (referencedEmbeds === undefined || referencedEmbeds.length === 0) {
+            console.error(`[TimeTravelBot] Could not find referenced message or embeds: ${message}`);
+            return null;
+        }
+
+        const referencedEmbed = referencedEmbeds[0];
+        const referencedFields = referencedEmbed.fields;
+        if (referencedFields.length < 2) {
+            console.error(`[TimeTravelBot] Could not find referenced message fields: ${message}`);
+            return null;
+        }
+
+        const mementoField = referencedFields[0];
+        let userField: APIEmbedField | null = null;
+        let originalField = referencedFields[1];
+        if (referencedFields.length === 3) {
+            userField = referencedFields[1];
+            originalField = referencedFields[2];
+        }
+
+        const originalUrl = originalField.value;
+
+        let userUrl: string | null = null;
+        if (userField !== null) {
+            const userNewLineIndex = userField.value.indexOf("\n");
+            if (userNewLineIndex > -1) {
+                userUrl = userField.value.substring(0, userNewLineIndex);
+            }
+        }
+
+        const mementoDepotName = mementoField.name.substring(0, mementoField.name.indexOf(" URL"));
+        const mementoNewLineIndex = mementoField.value.indexOf("\n");
+        let mementoUrl = mementoField.value;
+        let mementoReason: string | null = null;
+        if (mementoNewLineIndex > -1) {
+            mementoUrl = mementoField.value.substring(0, mementoNewLineIndex);
+            mementoReason = mementoField.value.substring(mementoNewLineIndex + 1);
+            if ((mementoReason.charAt(0) === "*" && mementoReason.charAt(mementoReason.length - 1) === "*") ||
+                    (mementoReason.charAt(0) === "_" && mementoReason.charAt(mementoReason.length - 1) === "_")) {
+                mementoReason = mementoReason.substring(1, mementoReason.length - 1);
+            }
+        }
+        const wasSubmitted = mementoReason !== null && mementoReason === TimeTravelBot.SUBMISSION_REASON;
+        const datetime = referencedEmbed.footer?.text === undefined ? null : referencedEmbed.footer?.text;
+
+        return {
+            originalUrl: originalUrl,
+            mementoDepotName: mementoDepotName,
+            mementoUrl: mementoUrl,
+            mementoReason: mementoReason,
+            wasSubmitted: wasSubmitted,
+            datetime: datetime,
+            user: null,
+            userUrl: userUrl
+        };
     }
 
-    static createHoldEmbed(url: string): EmbedBuilder {
-        return new EmbedBuilder()
-            .setTitle("Time traveling, please hold...")
-            .setColor(0x8C8F91)
-            .addFields({ name: "Original URL", value: url });
+    static dateToTimeStr(date: Date | null): string {
+        if (date !== null) {
+            return date.toLocaleString("en-US");
+        } else {
+            return "Time unknown";
+        }
     }
 
-    static createSuccessEmbed(originalUrl: string, mementoUrl: string, datetime: string): EmbedBuilder {
-        return new EmbedBuilder()
-            .setTitle("Time travel successful")
-            .setColor(0x00FF00)
-            .addFields(
-                { name: "Memento URL", value: mementoUrl },
-                { name: "Original URL", value: originalUrl }
-            )
-            .setFooter({ text: `Timestamp of Memento: ${datetime}` });
+    static createHoldEmbed(url: string): BaseMessageOptions {
+        return {
+            embeds: [new EmbedBuilder()
+                .setTitle("Time traveling, please hold...")
+                .setColor(0x8C8F91)
+                .addFields({ name: "Original URL", value: url })],
+            allowedMentions: {
+                repliedUser: false
+            }
+        };
     }
 
-    static createFailedEmbed(url: string, error: unknown = null): EmbedBuilder {
-        let reason = "Unknown error. Bot owner should check logs.";
-        if (error instanceof Error) {
-            reason = error.message;
-        } else if (typeof error === "string") {
-            reason = error;
-        } else if (typeof error === "number") {
-            reason = error.toString();
+    static createHoldSaveEmbed(submissionEvent: TimeTravelProcessorSubmissionEvent): BaseMessageOptions {
+        return {
+            embeds: [new EmbedBuilder()
+                .setTitle("Attempting to save a new link, please hold...")
+                .setColor(0x8C8F91)
+                .addFields(
+                    { name: submissionEvent.submittedName, value: "Submitting request to save a new link..." },
+                    { name: "Original URL", value: submissionEvent.originalUrl }
+                )],
+            allowedMentions: {
+                repliedUser: false
+            }
+        };
+    }
+
+    static createFallbackEmbed(originalUrl: string, fallbackUrl: string | null): BaseMessageOptions {
+        return TimeTravelBot.createMementoEmbed({
+            originalUrl: originalUrl,
+            mementoDepotName: "Fallback",
+            mementoUrl: fallbackUrl !== null ? fallbackUrl : TimeTravelProcessor.getFallbackUrl(originalUrl),
+            mementoReason: TimeTravelBot.FALLBACK_REASON,
+            wasSubmitted: false,
+            datetime: null,
+            user: null,
+            userUrl: null
+        });
+    }
+
+    static createMementoEmbed(details: MementoEmbedDetails): BaseMessageOptions {
+        let embedColor = TimeTravelBot.COLOR_SUCCESS;
+        const fields: APIEmbedField[] = [];
+
+        let mementoFieldValue = details.mementoUrl;
+        if (details.mementoReason !== null) {
+            mementoFieldValue += `\n${italic(details.mementoReason)}`;
+            if (!details.wasSubmitted) {
+                embedColor = TimeTravelBot.COLOR_FALLBACK;
+            }
+        }
+        fields.push({ name: `${details.mementoDepotName} URL`, value: mementoFieldValue });
+
+        let userUrlDeleteBtn: ButtonBuilder | null = null;
+        if (details.userUrl !== null && details.user !== null) {
+            fields.push({
+                name: "User Provided URL",
+                value: `${details.userUrl}\n${italic("Submitted by " + details.user.toString())}`
+            });
+            userUrlDeleteBtn = TimeTravelBot.createUserUrlDeleteButton();
+
+            if (embedColor === TimeTravelBot.COLOR_FALLBACK) {
+                embedColor = TimeTravelBot.COLOR_USER_ONLY;
+            }
+        }
+
+        fields.push({ name: "Original URL", value: details.originalUrl });
+        let timestampText = "";
+        if (typeof details.datetime === "string") {
+            timestampText = details.datetime;
+        } else {
+            timestampText = TimeTravelBot.dateToTimeStr(details.datetime);
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle("Time travel complete")
+            .setColor(embedColor)
+            .addFields(fields)
+            .setFooter({ text: timestampText });
+
+        const actionRow = new ActionRowBuilder() as ActionRowBuilder<ButtonBuilder>;
+        actionRow.addComponents(TimeTravelBot.createUserUrlSubmitButton());
+        if (userUrlDeleteBtn !== null) {
+            actionRow.addComponents(userUrlDeleteBtn);
+        }
+
+        return {
+            embeds: [embed],
+            components: [actionRow],
+            allowedMentions: {
+                repliedUser: false
+            }
+        };
+    }
+
+    static createErrorEmbed(title: string, url: string | null): EmbedBuilder {
+        const embed = new EmbedBuilder()
+            .setTitle(title)
+            .setColor(0xFF0000);
+        if (url !== null) {
+            embed.addFields({ name: "Provided URL", value: url });
+        }
+
+        return embed;
+    }
+
+    static createReferencedMessageSuccessEmbed(referencedMessage: Message, title: string, urlName: string | null, urlValue: string | null): EmbedBuilder {
+        const fields: APIEmbedField[] = [
+            { name: "Message", value: referencedMessage.url }
+        ];
+
+        if (urlName !== null && urlValue !== null) {
+            fields.push({ name: urlName, value: urlValue });
         }
 
         return new EmbedBuilder()
-            .setTitle("Error while time traveling")
-            .setColor(0xFF0000)
-            .addFields(
-                { name: "Reason", value: reason },
-                { name: "Original URL", value: url }
-            );
+            .setTitle(title)
+            .addFields(fields)
+            .setColor(0x00FF00);
     }
 
-    static isValidUrl(url: string): boolean {
+    static createUserUrlSubmitButton(): ButtonBuilder {
+        return new ButtonBuilder()
+            .setCustomId(TimeTravelBot.BTN_USER_URL_MODAL)
+            .setLabel("Provide user URL")
+            .setStyle(ButtonStyle.Secondary);
+    }
+
+    static createUserUrlDeleteButton(): ButtonBuilder {
+        return new ButtonBuilder()
+            .setCustomId(TimeTravelBot.BTN_USER_URL_DELETE)
+            .setLabel("Delete user URL")
+            .setStyle(ButtonStyle.Danger);
+    }
+
+    static getValidUrl(url: string, addHttps: boolean): string | null {
         try {
-            new URL(url);
-            return true;
+            let returnUrl = url.trim();
+            if (addHttps && (!returnUrl.startsWith("http://") || !returnUrl.startsWith("https://"))) {
+                returnUrl = `https://${returnUrl}`;
+            }
+
+            new URL(returnUrl);
+            return returnUrl;
         } catch {
-            return false;
+            return null;
         }
     }
 }
