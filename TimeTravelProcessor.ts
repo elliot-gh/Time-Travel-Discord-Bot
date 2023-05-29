@@ -4,6 +4,8 @@ import { Memento, MementoDepot } from "./archivers/MementoDepot";
 import { ArchiveTodaySubmission } from "./archivers/ArchiveTodaySubmission";
 import { InternetArchiveSubmission } from "./archivers/InternetArchiveSubmission";
 import { IArchiveSubmission } from "./archivers/IArchiveSubmission";
+import { Logger } from "winston";
+import { createLogger } from "../../utils/Logger";
 
 export class TimeTravelProcessorError extends Error {
     private statusCode = -1;
@@ -47,18 +49,20 @@ export class TimeTravelProcessor {
 
     private readonly originalUrlStr: string;
     private readonly formattedUrl: string;
+    private readonly logger: Logger;
 
     constructor(originalUrlStr: string) {
+        this.logger = createLogger("TimeTravelProcessor");
         this.originalUrlStr = originalUrlStr;
         const formattedUrlObj = new URL(originalUrlStr);
         formattedUrlObj.search = "";
         formattedUrlObj.hash = "";
         this.formattedUrl = formattedUrlObj.toString();
-        console.log(`[TimeTravelProcessor] constructor for url ${originalUrlStr}, formattedUrl is ${this.formattedUrl}`);
+        this.logger.info(`constructor for url ${originalUrlStr}, formattedUrl is ${this.formattedUrl}`);
     }
 
     async process(eventEmitter: EventEmitter, emitterId: string): Promise<TimeTravelProcessorResult> {
-        console.log(`[TimeTravelProcessor] beginProcessing() for url ${this.formattedUrl}`);
+        this.logger.info(`beginProcessing() for url ${this.formattedUrl}`);
 
         // try search through depots
         let shouldSubmit = false;
@@ -66,7 +70,7 @@ export class TimeTravelProcessor {
             try {
                 return await this.useSpecificDepot(depotName);
             } catch (error) {
-                console.error(`[TimeTravelProcessor] beginProcessing() error while using depot ${depotName}:\n${error}`);
+                this.logger.error(`beginProcessing() error while using depot ${depotName}:\n${error}`);
                 if (error instanceof TimeTravelProcessorError) {
                     if (error.getStatusCode() >= 300 && error.getStatusCode() < 500) {
                         shouldSubmit = true;
@@ -76,8 +80,8 @@ export class TimeTravelProcessor {
         }
 
         if (!shouldSubmit) {
-            const errStr = `[TimeTravelProcessor] Unable to find any mementos for url ${this.formattedUrl} and did not get a 404`;
-            console.error(errStr);
+            const errStr = `Unable to find any mementos for url ${this.formattedUrl} and did not get a 404`;
+            this.logger.error(errStr);
             throw new TimeTravelProcessorError(errStr);
         }
 
@@ -90,7 +94,7 @@ export class TimeTravelProcessor {
 
             for (const submitter of submitters) {
                 try {
-                    console.log(`[TimeTravelProcessor] beginProcessing() submitting to ${submitter.name} for url ${this.formattedUrl}`);
+                    this.logger.info(`beginProcessing() submitting to ${submitter.name} for url ${this.formattedUrl}`);
                     const emitterEvent: TimeTravelProcessorSubmissionEvent = {
                         originalUrl: this.formattedUrl,
                         submittedName: submitter.name
@@ -101,16 +105,17 @@ export class TimeTravelProcessor {
                     let isDone = result.isDone;
                     while (!isDone) {
                         if (submitter.waitBetweenStatus !== null) {
+                            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                             await new Promise(resolve => setTimeout(resolve, submitter.waitBetweenStatus!));
                         }
 
-                        console.log(`[TimeTravelProcessor] beginProcessing() checking status of ${submitter.name} for url ${this.formattedUrl}`);
+                        this.logger.info(`beginProcessing() checking status of ${submitter.name} for url ${this.formattedUrl}`);
                         result = await submitter.checkStatus();
                         isDone = result.isDone;
                     }
 
                     if (result.finalUrl === null) {
-                        console.error(`[TimeTravelProcessor] Unable to submit to ${submitter.name} for url ${this.formattedUrl}, got status code ${result.statusCode}`);
+                        this.logger.error(`Unable to submit to ${submitter.name} for url ${this.formattedUrl}, got status code ${result.statusCode}`);
                         continue;
                     }
 
@@ -123,21 +128,21 @@ export class TimeTravelProcessor {
                         datetime: result.datetime
                     };
                 } catch (error) {
-                    console.error(`[TimeTravelProcessor] Error while trying to submit to ${submitter.name} for url ${this.formattedUrl}:\n${error}`);
+                    this.logger.error(`Error while trying to submit to ${submitter.name} for url ${this.formattedUrl}:\n${error}`);
                     continue;
                 }
             }
 
-            const errStr = `[TimeTravelProcessor] Unable to submit to any archive for url ${this.formattedUrl}`;
-            console.error(errStr);
+            const errStr = `Unable to submit to any archive for url ${this.formattedUrl}`;
+            this.logger.error(errStr);
             throw new TimeTravelProcessorError(errStr);
         } catch (error) {
             if (error instanceof TimeTravelProcessorError) {
                 throw error;
             }
 
-            const errStr = `[TimeTravelProcessor] Error while trying to submit to archive.today for url ${this.formattedUrl}:\n${error}`;
-            console.error(errStr);
+            const errStr = `Error while trying to submit to archive.today for url ${this.formattedUrl}:\n${error}`;
+            this.logger.error(errStr);
             throw new TimeTravelProcessorError(errStr);
         }
     }
@@ -148,24 +153,24 @@ export class TimeTravelProcessor {
     async useSpecificDepot(depotName: string): Promise<TimeTravelProcessorResult> {
         const depot = TimeTravelProcessor.depots[depotName];
         if (depot === undefined) {
-            const errStr = `[TimeTravelProcessor] Could not find depot ${depotName} for url ${this.formattedUrl}`;
-            console.error(errStr);
+            const errStr = `Could not find depot ${depotName} for url ${this.formattedUrl}`;
+            this.logger.error(errStr);
             throw new TimeTravelProcessorError(errStr);
         }
 
-        console.log(`[TimeTravelProcessor] useSpecificDepot() ${depotName} for url ${this.formattedUrl}`);
+        this.logger.info(`useSpecificDepot() ${depotName} for url ${this.formattedUrl}`);
         let result: Memento;
         try {
             result = await depot.getLatestMemento(this.formattedUrl);
         } catch (error) {
-            const errStr = `[TimeTravelProcessor] Error calling getLatestMemento() on ${depotName} for url ${this.formattedUrl}:\n${error}`;
-            console.error(errStr);
+            const errStr = `Error calling getLatestMemento() on ${depotName} for url ${this.formattedUrl}:\n${error}`;
+            this.logger.error(errStr);
             throw new TimeTravelProcessorError(errStr);
         }
 
         if (result.status >= 400 || result.url === null) {
-            const errStr = `${result.status}: [TimeTravelProcessor] Got status code ${result.status} from ${depotName} for url ${this.formattedUrl}`;
-            console.error(errStr);
+            const errStr = `${result.status}: Got status code ${result.status} from ${depotName} for url ${this.formattedUrl}`;
+            this.logger.error(errStr);
             const statusError = new TimeTravelProcessorError(errStr);
             statusError.setStatusCode(result.status);
             throw statusError;

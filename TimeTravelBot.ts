@@ -5,10 +5,23 @@ import { CommandInteraction, Client, Message, GatewayIntentBits, ChatInputComman
     ActionRowBuilder, ButtonStyle, User, italic, BaseMessageOptions, ButtonInteraction, TextInputBuilder, ModalSubmitInteraction, ModalBuilder } from "discord.js";
 import { APIEmbedField, TextInputStyle } from "discord-api-types/v10";
 import { find } from "linkifyjs";
-import { BotInterface } from "../../BotInterface";
-import { readYamlConfig } from "../../utils/ConfigUtils";
-import { TimeTravelConfig } from "./TimeTravelConfig";
 import { TimeTravelProcessorResult, TimeTravelProcessor, TimeTravelProcessorSubmissionEvent } from "./TimeTravelProcessor";
+import { BotWithConfig } from "../../BotWithConfig";
+
+type TimeTravelConfig = {
+    autoTimeTravel: boolean,
+    axiosUserAgent: string | null,
+    allowlist: {
+        [domain: string]: boolean
+    },
+    mementoDepots: {
+        [depotName: string]: {
+            timeGate: string,
+            fallback: string | null
+        }
+    }
+}
+
 
 type MementoEmbedDetails = {
     originalUrl: string,
@@ -21,7 +34,7 @@ type MementoEmbedDetails = {
     datetime: Date | string | null
 }
 
-export class TimeTravelBot implements BotInterface {
+export class TimeTravelBot extends BotWithConfig {
     intents: GatewayIntentBits[];
     commands: (SlashCommandBuilder | ContextMenuCommandBuilder)[];
 
@@ -39,9 +52,11 @@ export class TimeTravelBot implements BotInterface {
 
     private slashTimeTravel!: SlashCommandBuilder;
     private contextTimeTravel!: ContextMenuCommandBuilder;
-    private config!: TimeTravelConfig;
+    private readonly config: TimeTravelConfig;
 
     constructor() {
+        super("TimeTravelBot", import.meta);
+        this.config = this.readYamlConfig<TimeTravelConfig>("config.yaml");
         this.intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages];
         this.slashTimeTravel = new SlashCommandBuilder()
             .setName("timetravel")
@@ -54,6 +69,7 @@ export class TimeTravelBot implements BotInterface {
             ) as SlashCommandBuilder;
         this.contextTimeTravel = new ContextMenuCommandBuilder()
             .setName("Time Travel URLs")
+            .setDMPermission(false)
             .setType(ApplicationCommandType.Message) as ContextMenuCommandBuilder;
         this.commands = [this.slashTimeTravel, this.contextTimeTravel];
     }
@@ -63,7 +79,7 @@ export class TimeTravelBot implements BotInterface {
             return;
         }
 
-        console.log(`[TimeTravelBot] got interaction: ${interaction}`);
+        this.logger.info(`got interaction: ${interaction}`);
         try {
             if (interaction.isChatInputCommand() && interaction.commandName === this.slashTimeTravel.name) {
                 await this.handleSlashCommand(interaction);
@@ -71,7 +87,7 @@ export class TimeTravelBot implements BotInterface {
                 await this.handleContextCommand(interaction);
             }
         } catch (error) {
-            console.error(`[TimeTravelBot] Uncaught exception in processSlashCommand(): ${error}`);
+            this.logger.error(`Uncaught exception in processSlashCommand(): ${error}`);
         }
     }
 
@@ -99,29 +115,29 @@ export class TimeTravelBot implements BotInterface {
         }
     }
 
-    async handleButtonClick(interaction: ButtonInteraction): Promise<void> {
+    private async handleButtonClick(interaction: ButtonInteraction): Promise<void> {
         if (interaction.customId === TimeTravelBot.BTN_USER_URL_MODAL) {
-            console.log(`[TimeTravelBot] Got button click: ${interaction.customId}`);
+            this.logger.info(`Got button click: ${interaction.customId}`);
             await this.handleUserUrlModalClick(interaction);
         } else if (interaction.customId === TimeTravelBot.BTN_USER_URL_DELETE) {
-            console.log(`[TimeTravelBot] Got button click: ${interaction.customId}`);
+            this.logger.info(`Got button click: ${interaction.customId}`);
             await this.handleUserDeleteClick(interaction);
         }
     }
 
-    async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    private async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
         if (interaction.customId === TimeTravelBot.MODAL_ID_USER_URL) {
-            console.log(`[TimeTravelBot] Got modal submit: ${interaction.customId}`);
+            this.logger.info(`Got modal submit: ${interaction.customId}`);
             await this.handleUserUrlModalSubmit(interaction);
         }
     }
 
-    async handleUserUrlModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    private async handleUserUrlModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
         const userUrl = interaction.fields.getTextInputValue(TimeTravelBot.MODAL_INPUT_URL);
-        console.log(`[TimeTravelBot] Got user URL: ${userUrl} from user: ${interaction.user}}`);
+        this.logger.info(`Got user URL: ${userUrl} from user: ${interaction.user}}`);
         const validUrl = TimeTravelBot.getValidUrl(userUrl, false);
         if (validUrl === null) {
-            console.log(`[TimeTravelBot] Invalid URL: ${userUrl} from user: ${interaction.user}}`);
+            this.logger.info(`Invalid URL: ${userUrl} from user: ${interaction.user}}`);
             await interaction.reply({
                 embeds: [TimeTravelBot.createErrorEmbed("Invalid URL", userUrl)],
                 ephemeral: true
@@ -134,16 +150,16 @@ export class TimeTravelBot implements BotInterface {
         });
 
         if (interaction.message === null) {
-            console.error(`[TimeTravelBot] Could not get message from interaction: ${interaction}`);
+            this.logger.error(`Could not get message from interaction: ${interaction}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
             });
             return;
         }
 
-        const details = TimeTravelBot.extractDetailsFromMessage(interaction.message);
+        const details = this.extractDetailsFromMessage(interaction.message);
         if (details === null)  {
-            console.error(`[TimeTravelBot] Could not extract details from message: ${interaction.message}`);
+            this.logger.error(`Could not extract details from message: ${interaction.message}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
             });
@@ -156,7 +172,7 @@ export class TimeTravelBot implements BotInterface {
         try {
             await interaction.message.edit(newMsg);
         } catch (error) {
-            console.error(`[TimeTravelBot] Could not edit message: ${error}`);
+            this.logger.error(`Could not edit message: ${error}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
             });
@@ -168,7 +184,7 @@ export class TimeTravelBot implements BotInterface {
         });
     }
 
-    async handleUserUrlModalClick(interaction: ButtonInteraction): Promise<void> {
+    private async handleUserUrlModalClick(interaction: ButtonInteraction): Promise<void> {
         const urlInput = new TextInputBuilder()
             .setCustomId(TimeTravelBot.MODAL_INPUT_URL)
             .setLabel("URL to Share")
@@ -185,16 +201,16 @@ export class TimeTravelBot implements BotInterface {
         await interaction.showModal(modal);
     }
 
-    async handleUserDeleteClick(interaction: ButtonInteraction): Promise<void> {
+    private async handleUserDeleteClick(interaction: ButtonInteraction): Promise<void> {
         const message = interaction.message;
 
         await interaction.deferReply({
             ephemeral: true
         });
 
-        const details = TimeTravelBot.extractDetailsFromMessage(message);
+        const details = this.extractDetailsFromMessage(message);
         if (details === null)  {
-            console.error(`[TimeTravelBot] Could not extract details from message: ${message}`);
+            this.logger.error(`Could not extract details from message: ${message}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
             });
@@ -208,7 +224,7 @@ export class TimeTravelBot implements BotInterface {
         try {
             await message.edit(newMsg);
         } catch (error) {
-            console.error(`[TimeTravelBot] Could not edit message in handleUserDeleteClick(): ${error}`);
+            this.logger.error(`Could not edit message in handleUserDeleteClick(): ${error}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Something went wrong when processing your modal submission.", null)],
             });
@@ -220,10 +236,10 @@ export class TimeTravelBot implements BotInterface {
         });
     }
 
-    async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    private async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
         const url = interaction.options.getString(TimeTravelBot.OPT_URL, true);
         try {
-            console.log(`[TimeTravelBot] handleSlashCommand() got URL: ${url}`);
+            this.logger.info(`handleSlashCommand() got URL: ${url}`);
 
             const validUrl = TimeTravelBot.getValidUrl(url, true);
             if (validUrl === null) {
@@ -238,7 +254,7 @@ export class TimeTravelBot implements BotInterface {
             await interaction.editReply(TimeTravelBot.createHoldEmbed(url));
 
             const eventEmitter = new EventEmitter();
-            const emitterPromises: Promise<any>[] = [];
+            const emitterPromises: Promise<unknown>[] = [];
             const emitterId = `${interaction.id}__${Date.now()}`;
             eventEmitter.on(emitterId, (eventObj: TimeTravelProcessorSubmissionEvent) => {
                 emitterPromises.push(interaction.editReply(TimeTravelBot.createHoldSaveEmbed(eventObj)));
@@ -255,14 +271,14 @@ export class TimeTravelBot implements BotInterface {
             eventEmitter.removeAllListeners(emitterId);
             await interaction.editReply(result);
         } catch (error) {
-            console.error(`[TimeTravelBot] Got error handling slash command: ${error}`);
+            this.logger.error(`Got error handling slash command: ${error}`);
             await interaction.editReply(TimeTravelBot.createFallbackEmbed(url, null));
         }
     }
 
-    async handleContextCommand(interaction: MessageContextMenuCommandInteraction): Promise<void> {
+    private async handleContextCommand(interaction: MessageContextMenuCommandInteraction): Promise<void> {
         const content = interaction.targetMessage.content;
-        console.log(`[TimeTravelBot] Got handleContextCommand() for message: ${content}`);
+        this.logger.info(`Got handleContextCommand() for message: ${content}`);
         const linkifyResults = find(content, "url");
         if (linkifyResults.length === 0) {
             await interaction.reply({
@@ -279,18 +295,18 @@ export class TimeTravelBot implements BotInterface {
                 { name: "URL Count", value: linkifyResults.length.toString() }
             )
             .setColor(0xFFFFFF);
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({ embeds: [embed], ephemeral: true });
         try {
             await this.handleAuto(interaction.targetMessage, true);
         } catch (error) {
-            console.error(`[TimeTravelBot] Got error handling context command:\n${error}`);
+            this.logger.error(`Got error handling context command:\n${error}`);
             await interaction.editReply({
                 embeds: [TimeTravelBot.createErrorEmbed("Unable to complete context menu command", null)]
             });
         }
     }
 
-    async handleAuto(message: Message, contextMenu: boolean): Promise<void> {
+    private async handleAuto(message: Message, contextMenu: boolean): Promise<void> {
         try {
             const content = message.content;
 
@@ -319,7 +335,7 @@ export class TimeTravelBot implements BotInterface {
 
                     urls.push(result.href);
                 } catch (error) {
-                    console.error(`[TimeTravelBot] Ignoring error for URL ${result.href}:\n${error}`);
+                    this.logger.error(`Ignoring error for URL ${result.href}:\n${error}`);
                     continue;
                 }
             }
@@ -328,13 +344,13 @@ export class TimeTravelBot implements BotInterface {
                 return;
             }
 
-            console.log(`[TimeTravelBot] handleAuto() May have found URLs: ${JSON.stringify(Array.from(urls))}`);
+            this.logger.info(`handleAuto() May have found URLs: ${JSON.stringify(Array.from(urls))}`);
             const emitterPrefix = `${message.id}__${Date.now()}__`;
             for (const url of urls) {
                 const replyMsg = await message.reply(TimeTravelBot.createHoldEmbed(url));
 
                 const eventEmitter = new EventEmitter();
-                const emitterPromises: Promise<any>[] = [];
+                const emitterPromises: Promise<unknown>[] = [];
                 const emitterId = `${emitterPrefix}${replyMsg.id}`;
                 eventEmitter.on(emitterId, (eventObj: TimeTravelProcessorSubmissionEvent) => {
                     emitterPromises.push(replyMsg.edit(TimeTravelBot.createHoldSaveEmbed(eventObj)));
@@ -351,7 +367,7 @@ export class TimeTravelBot implements BotInterface {
                     const result = await timeTravelPromise;
                     await replyMsg.edit(result);
                 } catch (error) {
-                    console.error(`[TimeTravelBot] Error in auto while calling timeTravel() for url ${url}:\n${error}`);
+                    this.logger.error(`Error in auto while calling timeTravel() for url ${url}:\n${error}`);
                     await replyMsg.edit(TimeTravelBot.createFallbackEmbed(url, null));
                 }
 
@@ -359,30 +375,30 @@ export class TimeTravelBot implements BotInterface {
                 await new Promise(resolve => setTimeout(resolve, TimeTravelBot.AUTO_TIMEOUT));
             }
 
-            console.log("[TimeTravelBot] handleAuto() finished");
+            this.logger.info("handleAuto() finished");
         } catch (error) {
-            console.error(`[TimeTravelBot] Ran into error in handleAuto(), ignoring: ${error}`);
+            this.logger.error(`Ran into error in handleAuto(), ignoring: ${error}`);
         }
     }
 
-    async timeTravel(originalUrl: string, eventEmitter: EventEmitter, emitterId: string): Promise<BaseMessageOptions> {
-        console.log(`[TimeTravelBot] Attempting to time travel ${originalUrl}`);
+    private async timeTravel(originalUrl: string, eventEmitter: EventEmitter, emitterId: string): Promise<BaseMessageOptions> {
+        this.logger.info(`Attempting to time travel ${originalUrl}`);
         const processor = new TimeTravelProcessor(originalUrl);
 
         let result: TimeTravelProcessorResult | null = null;
         try {
             result = await processor.process(eventEmitter, emitterId);
         } catch (error) {
-            console.error(`[TimeTravelBot] Error in timeTravel():\n${error}`);
+            this.logger.error(`Error in timeTravel():\n${error}`);
             result = null;
         }
 
         if (result === null) {
-            console.error(`[TimeTravelBot] Got null result for ${originalUrl}`);
+            this.logger.error(`Got null result for ${originalUrl}`);
             return TimeTravelBot.createFallbackEmbed(originalUrl, processor.getFallbackUrl());
         }
 
-        console.log(`[TimeTravelBot] timeTravel() processor for ${originalUrl} returned result:\n${JSON.stringify(result, null, 2)}`);
+        this.logger.info(`timeTravel() processor for ${originalUrl} returned result:\n${JSON.stringify(result, null, 2)}`);
         if (result.foundUrl !== null && result.depotUsedName !== null) {
             return TimeTravelBot.createMementoEmbed({
                 originalUrl: originalUrl,
@@ -407,34 +423,33 @@ export class TimeTravelBot implements BotInterface {
             });
         }
 
-        console.error(`[TimeTravelBot] timeTravel() processor for ${originalUrl} returned malformed result:\n${JSON.stringify(result, null, 2)}`);
+        this.logger.error(`timeTravel() processor for ${originalUrl} returned malformed result:\n${JSON.stringify(result, null, 2)}`);
         return TimeTravelBot.createFallbackEmbed(originalUrl, processor.getFallbackUrl());
     }
 
-    async init(): Promise<string | null> {
+    async preInit(): Promise<string | null> {
         try {
-            this.config = await readYamlConfig<TimeTravelConfig>(import.meta, "config.yaml");
             TimeTravelProcessor.init(this.config);
         } catch (error) {
-            const errMsg = `[TimeTravelBot] Unable to read config: ${error}`;
-            console.error(errMsg);
+            const errMsg = `Unable to read config: ${error}`;
+            this.logger.error(errMsg);
             return errMsg;
         }
 
         return null;
     }
 
-    static extractDetailsFromMessage(message: Message): MementoEmbedDetails | null {
+    private extractDetailsFromMessage(message: Message): MementoEmbedDetails | null {
         const referencedEmbeds = message.embeds;
         if (referencedEmbeds === undefined || referencedEmbeds.length === 0) {
-            console.error(`[TimeTravelBot] Could not find referenced message or embeds: ${message}`);
+            this.logger.error(`Could not find referenced message or embeds: ${message}`);
             return null;
         }
 
         const referencedEmbed = referencedEmbeds[0];
         const referencedFields = referencedEmbed.fields;
         if (referencedFields.length < 2) {
-            console.error(`[TimeTravelBot] Could not find referenced message fields: ${message}`);
+            this.logger.error(`Could not find referenced message fields: ${message}`);
             return null;
         }
 
@@ -483,7 +498,7 @@ export class TimeTravelBot implements BotInterface {
         };
     }
 
-    static dateToTimeStr(date: Date | null): string {
+    private static dateToTimeStr(date: Date | null): string {
         if (date !== null) {
             return date.toLocaleString("en-US");
         } else {
@@ -491,7 +506,7 @@ export class TimeTravelBot implements BotInterface {
         }
     }
 
-    static createHoldEmbed(url: string): BaseMessageOptions {
+    private static createHoldEmbed(url: string): BaseMessageOptions {
         return {
             embeds: [new EmbedBuilder()
                 .setTitle("Time traveling, please hold...")
@@ -503,7 +518,7 @@ export class TimeTravelBot implements BotInterface {
         };
     }
 
-    static createHoldSaveEmbed(submissionEvent: TimeTravelProcessorSubmissionEvent): BaseMessageOptions {
+    private static createHoldSaveEmbed(submissionEvent: TimeTravelProcessorSubmissionEvent): BaseMessageOptions {
         return {
             embeds: [new EmbedBuilder()
                 .setTitle("Attempting to save a new link, please hold...")
@@ -518,7 +533,7 @@ export class TimeTravelBot implements BotInterface {
         };
     }
 
-    static createFallbackEmbed(originalUrl: string, fallbackUrl: string | null): BaseMessageOptions {
+    private static createFallbackEmbed(originalUrl: string, fallbackUrl: string | null): BaseMessageOptions {
         return TimeTravelBot.createMementoEmbed({
             originalUrl: originalUrl,
             mementoDepotName: "Fallback",
@@ -531,7 +546,7 @@ export class TimeTravelBot implements BotInterface {
         });
     }
 
-    static createMementoEmbed(details: MementoEmbedDetails): BaseMessageOptions {
+    private static createMementoEmbed(details: MementoEmbedDetails): BaseMessageOptions {
         let embedColor = TimeTravelBot.COLOR_SUCCESS;
         const fields: APIEmbedField[] = [];
 
@@ -586,7 +601,7 @@ export class TimeTravelBot implements BotInterface {
         };
     }
 
-    static createErrorEmbed(title: string, url: string | null): EmbedBuilder {
+    private static createErrorEmbed(title: string, url: string | null): EmbedBuilder {
         const embed = new EmbedBuilder()
             .setTitle(title)
             .setColor(0xFF0000);
@@ -597,7 +612,7 @@ export class TimeTravelBot implements BotInterface {
         return embed;
     }
 
-    static createReferencedMessageSuccessEmbed(referencedMessage: Message, title: string, urlName: string | null, urlValue: string | null): EmbedBuilder {
+    private static createReferencedMessageSuccessEmbed(referencedMessage: Message, title: string, urlName: string | null, urlValue: string | null): EmbedBuilder {
         const fields: APIEmbedField[] = [
             { name: "Message", value: referencedMessage.url }
         ];
@@ -612,21 +627,21 @@ export class TimeTravelBot implements BotInterface {
             .setColor(0x00FF00);
     }
 
-    static createUserUrlSubmitButton(): ButtonBuilder {
+    private static createUserUrlSubmitButton(): ButtonBuilder {
         return new ButtonBuilder()
             .setCustomId(TimeTravelBot.BTN_USER_URL_MODAL)
             .setLabel("Provide user URL")
             .setStyle(ButtonStyle.Secondary);
     }
 
-    static createUserUrlDeleteButton(): ButtonBuilder {
+    private static createUserUrlDeleteButton(): ButtonBuilder {
         return new ButtonBuilder()
             .setCustomId(TimeTravelBot.BTN_USER_URL_DELETE)
             .setLabel("Delete user URL")
             .setStyle(ButtonStyle.Danger);
     }
 
-    static getValidUrl(url: string, addHttps: boolean): string | null {
+    private static getValidUrl(url: string, addHttps: boolean): string | null {
         try {
             let returnUrl = url.trim();
             if (addHttps && (!returnUrl.startsWith("http://") || !returnUrl.startsWith("https://"))) {
@@ -638,5 +653,13 @@ export class TimeTravelBot implements BotInterface {
         } catch {
             return null;
         }
+    }
+
+    getIntents(): GatewayIntentBits[] {
+        return this.intents;
+    }
+
+    getSlashCommands(): (SlashCommandBuilder | ContextMenuCommandBuilder)[] {
+        return this.commands;
     }
 }
